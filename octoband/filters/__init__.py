@@ -13,7 +13,7 @@ Raw message format from python-rtmidi:
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+import queue
 
 # Type alias for clarity throughout the codebase
 MidiMsg = list[int]
@@ -34,6 +34,11 @@ class BaseFilter(ABC):
     def process(self, msg: MidiMsg) -> list[MidiMsg]:
         ...
 
+    def set_output_queue(self, q: "queue.Queue") -> None:
+        """Called by InputDevice for filters that need to inject async messages (e.g. timed release).
+        No-op by default — only override if the filter needs to schedule future messages."""
+        pass
+
 
 def build_filter(spec: dict) -> BaseFilter:
     """Instantiate a filter from a config dict. Pops 'type' and passes the rest as kwargs."""
@@ -45,4 +50,4 @@ def build_filter(spec: dict) -> BaseFilter:
 
 
 # Import submodules so their @register decorators fire
-from octoband.filters import channel, notes, cc, generators  # noqa: E402, F401
+from octoband.filters import channel, notes, cc, generators, triggers  # noqa: E402, F401

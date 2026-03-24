@@ -166,3 +166,54 @@ class DoubleTrigger(BaseFilter):
         doubled = max(0, min(127, note + self._offset))
         extra = [msg[0], doubled, msg[2]]
         return [msg, extra]
+
+
+@register("foot_latch")
+class FootLatch(BaseFilter):
+    """Monophonic latch for foot pedal controllers.
+
+    Only one note is held at a time. Pressing a new note releases the previous
+    one and latches the new one. A dedicated heel key mutes the current note
+    without triggering a new one. All note-offs are swallowed — notes stay
+    latched until replaced or muted.
+
+    Config:
+        heel_note: int   MIDI note that acts as mute key (default 36 / C2)
+    """
+
+    def __init__(self, heel_note: int = 36):
+        self._heel = heel_note
+        self._held_note: int | None = None
+        self._held_channel: int = 0
+
+    def process(self, msg: MidiMsg) -> list[MidiMsg]:
+        if len(msg) < 2:
+            return [msg]
+        status = msg[0] & 0xF0
+        if status not in (0x80, 0x90):
+            return [msg]
+
+        note = msg[1]
+        vel = msg[2] if len(msg) >= 3 else 0
+        ch = msg[0] & 0x0F
+        is_on = status == 0x90 and vel > 0
+
+        if is_on:
+            out = []
+            if note == self._heel:
+                # Heel key: mute current note, trigger nothing
+                if self._held_note is not None:
+                    out.append([0x80 | self._held_channel, self._held_note, 0])
+                    self._held_note = None
+                return out
+            else:
+                # Regular note: release previous, latch new
+                if self._held_note is not None:
+                    out.append([0x80 | self._held_channel, self._held_note, 0])
+                self._held_note = note
+                self._held_channel = ch
+                out.append(msg)
+                return out
+        else:
+            # Swallow all note-offs — latched notes stay held
+            return []

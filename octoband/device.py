@@ -52,6 +52,8 @@ class InputDevice:
         port_index = find_port(self._midi_in, self._port_spec)
         self._midi_in.open_port(port_index)
         self._midi_in.set_callback(self._callback)
+        for f in self._filters:
+            f.set_output_queue(self._output_queue)
         self._thread = threading.Thread(target=self._run, name=f"device-{self._name}", daemon=True)
         self._thread.start()
         print(f"[octo-band] {self._name}: opened port matching '{self._port_spec}'")

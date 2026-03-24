@@ -43,11 +43,11 @@ MIDI harmonica     ──────► filter chain      │
                            processors
 ```
 
-Each physical device gets its own filter chain. Filters can remap channels,
-transpose notes, transform CC messages, or generate new events entirely. A
-second layer of global processors handles cross-device logic — a foot pedal
-holding a latch while the keyboard plays, or the harmonica's breath shaping the
-expression of whatever the hands are doing.
+Each physical device gets its own ordered filter chain. Messages flow through
+each filter in sequence — a filter can pass a message through, modify it, drop
+it entirely, or expand it into multiple messages. A second layer of global
+processors sits at the output and sees everything from all devices, enabling
+cross-device behaviors.
 
 ---
 
@@ -69,48 +69,6 @@ simultaneously:
 Latches are what make this scale. A foot press that toggles a hold frees up
 that foot for the next action. A breath-controlled latch can sustain a chord
 while both hands move to something else entirely.
-
----
-
-## Configuration
-
-Everything lives in a single YAML file:
-
-```yaml
-devices:
-  foot_controller:
-    port: "FCB1010"                    # substring match on system port name
-    filters:
-      - type: hold_latch               # momentary press becomes toggle
-        notes: [60, 62]
-      - type: cc_to_note               # expression pedal fires a note
-        cc: 64
-        note: 48
-
-  harmonica:
-    port: "Harmonicist"
-    filters:
-      - type: breath_to_cc             # breath pressure → expression
-        source_cc: 2
-        target_cc: 11
-      - type: transpose
-        semitones: -12
-
-  keyboard:
-    port: "MiniLab"
-    filters:
-      - type: channel_map
-        from: 1
-        to: 3
-
-global_processors:
-  - type: chord_trigger
-    trigger_note: 36
-    chord: [36, 40, 43]
-
-output:
-  port_name: "octo-band"
-```
 
 ---
 
@@ -139,36 +97,356 @@ pip install -e .
 ## Usage
 
 ```bash
-# List available MIDI ports
+# List available MIDI ports on your system
 octo-band --list-ports
 
 # Run with a config file
 octo-band --config my-rig.yaml
 
-# Dry run — print events without outputting MIDI
+# Dry run — print outgoing MIDI messages instead of sending them
+# Useful for verifying filter behaviour before connecting a DAW
 octo-band --config my-rig.yaml --dry-run
 ```
 
 ---
 
-## Built-in Filters
+## Configuration
 
-| Filter | Description |
+Everything lives in a single YAML file. Run `octo-band --list-ports` first to
+find the exact names of your devices, then use any substring of those names in
+the `port` field — matching is case-insensitive.
+
+```yaml
+devices:
+
+  foot_controller:
+    port: "FCB1010"             # substring of the system port name
+    filters:
+      - type: foot_latch        # monophonic latch: one note held at a time
+        heel_note: 36
+      - type: channel_map
+        from_ch: 1
+        to_ch: 10               # remap to drums channel
+
+  harmonica:
+    port: "Harmonicist"
+    filters:
+      - type: breath_to_cc
+        source_cc: 2            # breath controller default CC
+        target_cc: 11           # expression
+      - type: transpose
+        semitones: -12
+
+  keyboard:
+    port: "MiniLab"
+    filters:
+      - type: release_trigger   # second note fires on key release
+        mode: fifth_up
+        release_mode: timed
+        release_duration: 0.4
+
+global_processors:
+  - type: chord_trigger
+    trigger_note: 60
+    chord: [60, 63, 67]
+
+output:
+  port_name: "octo-band"       # name of the virtual MIDI port
+```
+
+### Structure
+
+- **`devices`** — one entry per physical controller. Each has a `port`
+  substring and a list of `filters` applied in order.
+- **`global_processors`** — another filter list applied to all output messages
+  after per-device chains, regardless of which device sent them.
+- **`output.port_name`** — the name of the virtual MIDI port that appears in
+  your DAW.
+
+---
+
+## Filters
+
+Filters are the building blocks of octo-band. Each filter receives a MIDI
+message and returns zero or more messages — it can pass, modify, drop, or
+expand. Chains are applied in order; the output of each filter feeds the next.
+
+---
+
+### Channel Routing
+
+**`channel_map`** — Rewrite all messages from one channel to another.
+
+```yaml
+- type: channel_map
+  from_ch: 1       # source channel (1–16)
+  to_ch: 10        # destination channel (1–16)
+```
+
+**`channel_remap`** — Rewrite multiple channels at once using a mapping dict.
+
+```yaml
+- type: channel_remap
+  map:
+    1: 3
+    2: 4
+```
+
+---
+
+### Note Transforms
+
+**`transpose`** — Shift all note numbers by a fixed number of semitones.
+Result is clamped to 0–127.
+
+```yaml
+- type: transpose
+  semitones: -12   # one octave down
+```
+
+**`note_filter`** — Whitelist or blacklist specific notes. Use one or the
+other, not both.
+
+```yaml
+- type: note_filter
+  whitelist: [36, 38, 40, 42]   # only these notes pass
+
+# or:
+- type: note_filter
+  blacklist: [60]                # drop middle C, pass everything else
+```
+
+**`velocity_scale`** — Multiply velocity by a factor, then clamp to a range.
+
+```yaml
+- type: velocity_scale
+  factor: 0.8        # scale down
+  min_vel: 5         # floor (default 1)
+  max_vel: 110       # ceiling (default 127)
+```
+
+---
+
+### CC Transforms
+
+**`breath_to_cc`** — Remap one CC number to another. Designed for breath
+controllers (CC2 → expression CC11) but works for any CC-to-CC remap.
+
+```yaml
+- type: breath_to_cc
+  source_cc: 2
+  target_cc: 11
+```
+
+**`cc_to_note`** — Convert a CC message into a note on/off. When the CC value
+rises to or above `threshold`, a note-on fires. When it falls back below,
+a note-off fires. Useful for turning an expression pedal or sustain pedal into
+a trigger.
+
+```yaml
+- type: cc_to_note
+  cc: 64             # sustain pedal
+  note: 48           # note to fire
+  threshold: 64      # default
+  channel: 1         # output channel (default: same as input)
+```
+
+**`note_to_cc`** — Convert note on/off into a CC message. Note-on sends the
+velocity as the CC value; note-off sends CC value 0.
+
+```yaml
+- type: note_to_cc
+  cc: 11
+  notes: [60, 62]    # optional: only convert these notes
+```
+
+---
+
+### Latches
+
+Latches are what separate a foot controller from a typing keyboard. They let
+one physical action hold a state so the performer's body can move on to
+something else.
+
+**`hold_latch`** — Per-note toggle latch. First press sends note-on and holds.
+Second press sends note-off and releases. Note-offs from the controller are
+swallowed — the note stays on until the next press. Multiple notes can be
+independently latched at the same time.
+
+```yaml
+- type: hold_latch
+  notes: [60, 62, 65]   # these specific notes become toggles
+```
+
+```
+Press  60  →  note-on  60  (held)
+Press  62  →  note-on  62  (held, 60 still held)
+Press  60  →  note-off 60  (released, 62 still held)
+Release physical key  →  swallowed
+```
+
+**`foot_latch`** — Monophonic latch. Only one note is held at a time. Pressing
+a new note releases the previous one and latches the new one. A dedicated
+`heel_note` acts as a mute key — it silences the current note without
+triggering a new one. All note-offs from the controller are swallowed. Well
+suited to a bass-note foot controller where you want clean single-note control
+with a quick mute.
+
+```yaml
+- type: foot_latch
+  heel_note: 36      # default C2
+```
+
+```
+Press 48  →  note-on  48           (latched)
+Press 50  →  note-off 48, note-on 50  (replaced)
+Press 36  →  note-off 50           (muted, nothing new)
+Release any key  →  swallowed
+```
+
+---
+
+### Triggers
+
+**`double_trigger`** — Fire two notes simultaneously on a single key press.
+The second note is offset by a fixed number of semitones. Useful for instant
+octave doubling, power chords, or thickening a bass line.
+
+```yaml
+- type: double_trigger
+  offset: 12           # semitone offset for second note (12 = octave up)
+  notes: [36, 38]      # optional: only double these notes
+```
+
+**`release_trigger`** — Fire a second note when a key is *released*, not when
+it is pressed. The key-press note plays normally; the key-release fires a new
+note. This creates a roll or re-attack effect — the note re-triggers every time
+you lift a finger.
+
+The second note's pitch is set by `mode`:
+
+| Mode | Pitch |
 |---|---|
-| `channel_map` | Rewrite MIDI channel |
-| `note_filter` | Whitelist or blacklist specific notes |
-| `transpose` | Shift notes by N semitones |
-| `velocity_scale` | Scale or clamp velocity range |
-| `hold_latch` | Convert momentary press to toggle note on/off |
-| `cc_to_note` | CC crossing a threshold fires a note on/off |
-| `note_to_cc` | Note on/off fires a CC message |
-| `breath_to_cc` | Map one CC to another (pressure, expression) |
-| `double_trigger` | One note fires two (unison, octave, harmony) |
-| `chord_trigger` | One note expands to a full chord |
-| `arpeggiator` | Step arpeggiator over held notes, clock-synced |
-| `delay` | Delay messages by N milliseconds |
+| `same_vel` | Same note, same velocity (default) |
+| `half_vel` | Same note, 50% velocity |
+| `octave_up` | +12 semitones |
+| `octave_down` | −12 semitones |
+| `fifth_up` | +7 semitones |
+| `third_up` | +4 semitones |
 
-Custom filters can be added as Python modules in a `plugins/` directory.
+The second note's duration is set by `release_mode`:
+
+| Release mode | Behaviour |
+|---|---|
+| `timed` | Ends after `release_duration` seconds (default 0.5) |
+| `next_press` | Held until the next key-on on the same channel |
+| `manual_off` | Held indefinitely (10s safety timeout) |
+
+```yaml
+- type: release_trigger
+  mode: fifth_up
+  release_mode: timed
+  release_duration: 0.4
+  velocity_offset: -20    # optional: adjust second note velocity
+  notes: [48, 50, 52]     # optional: only trigger on these notes
+```
+
+```
+Press 60  →  note-on  60  (first note plays)
+Release 60  →  note-off 60, note-on 67  (fifth fires on release)
+(0.4s later)  →  note-off 67  (timed release)
+```
+
+---
+
+### Generators
+
+**`chord_trigger`** — Expand a single note into a chord. One note-on becomes
+note-ons for all notes in the chord; one note-off releases all of them.
+
+```yaml
+- type: chord_trigger
+  trigger_note: 60
+  chord: [60, 63, 67]   # root, minor third, fifth
+```
+
+**`passthrough`** — No-op. Passes all messages unchanged. Useful as a
+placeholder while building a config.
+
+```yaml
+- type: passthrough
+```
+
+---
+
+## Example Rigs
+
+### Bass foot pedal with monophonic latch
+
+```yaml
+devices:
+  bass_pedals:
+    port: "FCB1010"
+    filters:
+      - type: foot_latch
+        heel_note: 36
+      - type: transpose
+        semitones: -12
+      - type: channel_map
+        from_ch: 1
+        to_ch: 2
+
+output:
+  port_name: "octo-band"
+```
+
+Press a pedal, that bass note sustains until you press another or hit the heel
+key. Transpose puts it in the right register. Channel 2 keeps it routed
+separately in the DAW.
+
+---
+
+### Harmonica with breath expression
+
+```yaml
+devices:
+  harmonica:
+    port: "Harmonicist"
+    filters:
+      - type: breath_to_cc
+        source_cc: 2
+        target_cc: 11
+      - type: velocity_scale
+        factor: 1.2
+        max_vel: 127
+
+output:
+  port_name: "octo-band"
+```
+
+Breath pressure controls expression (CC11) continuously. Velocity is boosted
+slightly since harmonicas tend to send conservatively.
+
+---
+
+### Keyboard with release re-triggers
+
+```yaml
+devices:
+  keys:
+    port: "MiniLab"
+    filters:
+      - type: release_trigger
+        mode: octave_up
+        release_mode: next_press
+
+output:
+  port_name: "octo-band"
+```
+
+Every key press plays the note normally. Every key release fires the note an
+octave higher, and that upper note is held until the next key press. Creates a
+natural call-and-response texture from a single hand.
 
 ---
 
