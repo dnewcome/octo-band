@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "octo-band"
+version = "0.1.0"
+description = "Unified MIDI hub with configurable filter chains"
+requires-python = ">=3.11"
+dependencies = [
+    "python-rtmidi",
+    "PyYAML",
+]
+
+[project.scripts]
+octo-band = "octoband.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["octoband*"]

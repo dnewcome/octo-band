@@ -1,0 +1,42 @@
+# octo-band example configuration
+# Run `octo-band --list-ports` to see exact port names, then use a substring here.
+
+devices:
+
+  foot_controller:
+    port: "FCB1010"               # substring match, case-insensitive
+    filters:
+      - type: hold_latch
+        notes: [36, 38]           # these pedal presses become toggles
+      - type: cc_to_note
+        cc: 64                    # sustain pedal CC
+        note: 48
+        threshold: 64
+      - type: channel_map
+        from_ch: 1
+        to_ch: 10                 # remap to drums channel
+
+  harmonica:
+    port: "Harmonicist"
+    filters:
+      - type: breath_to_cc
+        source_cc: 2              # breath controller default CC
+        target_cc: 11             # expression
+      - type: transpose
+        semitones: -12
+
+  keyboard:
+    port: "MiniLab"
+    filters:
+      - type: velocity_scale
+        factor: 0.9
+        min_vel: 5
+        max_vel: 120
+
+global_processors:
+  - type: chord_trigger
+    trigger_note: 60              # middle C expands to a minor chord
+    chord: [60, 63, 67]
+
+output:
+  port_name: "octo-band"
